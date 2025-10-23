@@ -1,25 +1,79 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 
 import argparse
 import os
 
-from model import VGG
 from data import load_dataset
+from model import VGG
 from train import train, test
 from quantization import apply_fake_quantization, QuantizedWrapper
 
 
+def collect_features(model, dataloader, device, normalize=False):
+    """Run the backbone to gather penultimate activations and labels."""
+    model.eval()
+    features, labels = [], []
+    with torch.no_grad():
+        for inputs, targets in dataloader:
+            inputs = inputs.to(device, non_blocking=True)
+
+            outputs = model.features(inputs)
+            outputs = outputs.view(outputs.size(0), -1)
+            outputs = model.classifier(outputs)
+            if normalize:
+                outputs = F.normalize(outputs, p=2, dim=1)
+
+            features.append(outputs.cpu())
+            labels.append(targets)
+    features = torch.cat(features)
+    labels = torch.cat(labels)
+    return features, labels
+
+
 def main(args):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = VGG('VGG11', num_classes=args.num_classes).to(device)
+    backbone_suffix = f"vgg11_{args.dataset.lower()}"
+    backbone_path = f"checkpoint/{backbone_suffix}.pth"
+    hd_suffix = None
+    if args.use_hd_classifier:
+        hd_suffix = f"{backbone_suffix}_hd{args.hd_dim}"
+        if args.hd_disable_normalize:
+            hd_suffix += "_nonorm"
+        hd_checkpoint_path = f"checkpoint/{hd_suffix}.pth"
+    else:
+        hd_checkpoint_path = None
+
+    model = VGG(
+        'VGG11',
+        num_classes=args.num_classes,
+        use_hd_classifier=args.use_hd_classifier,
+        hd_dim=args.hd_dim,
+        hd_normalize=not args.hd_disable_normalize,
+    ).to(device)
+    if args.use_hd_classifier:
+        print(f"Using HD classifier head (dim={args.hd_dim}, normalize={not args.hd_disable_normalize})")
     train_loader, test_loader = load_dataset(args.batch_size, args.dataset)
 
-    if os.path.exists(args.save_path):
-        model.load_state_dict(torch.load(args.save_path))
-        print("Model loaded from", args.save_path)
+    if os.path.exists(backbone_path):
+        checkpoint = torch.load(backbone_path, map_location=device)
+        if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            checkpoint = checkpoint["state_dict"]
+        load_result = model.load_state_dict(checkpoint, strict=not args.use_hd_classifier)
+        print("Backbone loaded from", backbone_path)
+        if hasattr(load_result, "missing_keys"):
+            if load_result.missing_keys:
+                print("Missing keys:", load_result.missing_keys)
+            if load_result.unexpected_keys:
+                print("Unexpected keys:", load_result.unexpected_keys)
     else:
+        if args.use_hd_classifier:
+            raise FileNotFoundError(
+                f"Pretrained VGG checkpoint not found at {backbone_path}. "
+                "Train the backbone first (run without --use_hd_classifier)."
+            )
         print("Starting training...")
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.SGD(
@@ -36,8 +90,58 @@ def main(args):
             test(model, test_loader, device, epoch)
             scheduler.step()
 
-        os.makedirs(os.path.dirname(args.save_path), exist_ok=True)
-        torch.save(model.state_dict(), args.save_path)
+        os.makedirs(os.path.dirname(backbone_path), exist_ok=True)
+        torch.save(model.state_dict(), backbone_path)
+        print("Backbone checkpoint saved to", backbone_path)
+
+    hd_checkpoint = None
+    if args.use_hd_classifier and os.path.exists(hd_checkpoint_path):
+        print("HD checkpoint found at", hd_checkpoint_path, "- loading and skipping HD fitting.")
+        hd_checkpoint = torch.load(hd_checkpoint_path, map_location=device)
+    elif args.use_hd_classifier:
+        model.eval()
+        model.hd_head.to(device)
+        model.hd_head.model.zero_()
+        print("Collecting features from training set for OnlineHD fitting...")
+        train_feats, train_labels = collect_features(
+            model, train_loader, device, normalize=model.hd_normalize
+        )
+        print(f"Fitting OnlineHD classifier on {train_feats.size(0)} samples...")
+        model.hd_head.fit(
+            train_feats.to(device),
+            train_labels.to(device),
+            encoded=False,
+            one_pass_fit=True,
+        )
+        # free large tensors early
+        del train_feats, train_labels
+        os.makedirs(os.path.dirname(hd_checkpoint_path), exist_ok=True)
+        hd_checkpoint = {
+            "backbone_state_dict": model.state_dict(),
+            "hd_dim": args.hd_dim,
+            "hd_normalize": model.hd_normalize,
+            "num_classes": args.num_classes,
+            "dataset": args.dataset,
+            "hd_model": model.hd_head.model.detach().cpu(),
+            "hd_encoder_basis": model.hd_head.encoder.basis.detach().cpu(),
+            "hd_encoder_base": model.hd_head.encoder.base.detach().cpu(),
+        }
+        torch.save(hd_checkpoint, hd_checkpoint_path)
+        print("HD checkpoint saved to", hd_checkpoint_path)
+    elif args.use_hd_classifier:
+        # hd_checkpoint is already populated from disk
+        pass
+
+    if args.use_hd_classifier and hd_checkpoint is not None:
+        if "backbone_state_dict" in hd_checkpoint:
+            model.load_state_dict(hd_checkpoint["backbone_state_dict"], strict=False)
+        if "hd_model" in hd_checkpoint:
+            model.hd_head.model.copy_(hd_checkpoint["hd_model"].to(device))
+        if "hd_encoder_basis" in hd_checkpoint:
+            model.hd_head.encoder.basis.copy_(hd_checkpoint["hd_encoder_basis"].to(device))
+        if "hd_encoder_base" in hd_checkpoint:
+            model.hd_head.encoder.base.copy_(hd_checkpoint["hd_encoder_base"].to(device))
+        print("HD checkpoint loaded into model.")
 
     # -----------------------------
     # Fake quantization and testing
@@ -55,23 +159,34 @@ def main(args):
         test(model, test_loader, device, epoch='Quantized-Data')
 
     print("Testing robustness under increasing weight noise...")
-    noise_levels = torch.arange(0.0, 0.21, 0.01).tolist()
+    noise_levels = torch.arange(0.0, 0.51, 0.01).tolist()
     original_state = model.state_dict()
+    original_hd_model = None
+    if args.use_hd_classifier:
+        original_hd_model = model.hd_head.model.detach().clone()
 
     for sigma in noise_levels:
         print(f"\n[Noise std: {sigma}] injecting into model weights...")
-        noisy_state = {}
-        for name, param in original_state.items():
-            if 'weight' in name and param.dtype == torch.float32:
-                noise = torch.randn_like(param) * sigma
-                noisy_state[name] = param + noise
-            else:
-                noisy_state[name] = param.clone()
-        model.load_state_dict(noisy_state)
-
+        if args.use_hd_classifier and original_hd_model is not None:
+            noise = torch.randn_like(original_hd_model) * sigma
+            model.hd_head.model.copy_(original_hd_model + noise)
+            diff_norm = (model.hd_head.model - original_hd_model).norm().item()
+            print(f"HD noise L2 delta: {diff_norm:.3f}")
+        else:
+            noisy_state = {}
+            for name, param in original_state.items():
+                if 'weight' in name and param.dtype == torch.float32:
+                    noise = torch.randn_like(param) * sigma
+                    noisy_state[name] = param + noise
+                else:
+                    noisy_state[name] = param.clone()
+            model.load_state_dict(noisy_state)
         acc = test(model, test_loader, device, epoch=f'Noise-{sigma:.3f}')
         print(f"Accuracy with noise std={sigma:.3f}: {acc:.2f}%")
-    model.load_state_dict(original_state)
+    if args.use_hd_classifier and original_hd_model is not None:
+        model.hd_head.model.copy_(original_hd_model)
+    else:
+        model.load_state_dict(original_state)
     
 
 if __name__ == '__main__':
@@ -91,7 +206,10 @@ if __name__ == '__main__':
     parser.add_argument('--data_quantization', action='store_true', help='Enable data activation quantization to 5 bits')
     parser.add_argument('--data_quantization_bits', default=5, type=int, help='Number of bits for data activation quantization')
 
+    parser.add_argument('--use_hd_classifier', action='store_true', help='Replace final linear layer with HD classifier head')
+    parser.add_argument('--hd_dim', default=10000, type=int, help='Dimensionality of the HD classifier head')
+    parser.add_argument('--hd_disable_normalize', action='store_true', help='Disable L2-normalization inside the HD classifier head')
+
     args = parser.parse_args()
-    args.save_path = f"checkpoint/vgg11_{args.dataset.lower()}.pth"
     args.num_classes = 10 if args.dataset == 'CIFAR10' else 100
     main(args)
