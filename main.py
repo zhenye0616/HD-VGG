@@ -110,8 +110,11 @@ def main(args):
         model.hd_head.fit(
             train_feats.to(device),
             train_labels.to(device),
+            lr = args.lr,
+            epochs = args.epochs,
             encoded=False,
             one_pass_fit=True,
+            bootstrap=args.hd_bootstrap
         )
         # free large tensors early
         del train_feats, train_labels
@@ -191,6 +194,8 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='VGG11 CIFAR10 Training')
+
+    # Dataset & optimization -------------------------------------------------
     parser.add_argument('--dataset', default='CIFAR10', type=str, choices=['CIFAR10', 'CIFAR100'], help='Dataset to use (default: CIFAR10)')
     parser.add_argument('--batch_size', default=128, type=int, help='Batch size for training and testing')
     parser.add_argument('--lr', default=0.01, type=float, help='Learning rate')
@@ -200,15 +205,20 @@ if __name__ == '__main__':
     parser.add_argument('--gamma', default=0.1, type=float, help='Gamma for LR scheduler')
     parser.add_argument('--epochs', default=50, type=int, help='Number of training epochs')
 
+    # Quantization knobs ----------------------------------------------------
     parser.add_argument('--network_quantization', action='store_true', help='Enable network weight quantization to 4 bits')
     parser.add_argument('--network_quantization_bits', default=4, type=int, help='Number of bits for network weight quantization')
-
     parser.add_argument('--data_quantization', action='store_true', help='Enable data activation quantization to 5 bits')
     parser.add_argument('--data_quantization_bits', default=5, type=int, help='Number of bits for data activation quantization')
 
+    # HD classifier options -------------------------------------------------
     parser.add_argument('--use_hd_classifier', action='store_true', help='Replace final linear layer with HD classifier head')
     parser.add_argument('--hd_dim', default=10000, type=int, help='Dimensionality of the HD classifier head')
     parser.add_argument('--hd_disable_normalize', action='store_true', help='Disable L2-normalization inside the HD classifier head')
+    parser.add_argument('--hd_bootstrap', default=0.01, type=float, help='Bootstrap fraction (0,1] used to seed HD hypervectors')
+    parser.add_argument('--hd_one_pass_fit', dest='hd_one_pass_fit', action='store_true', help='Enable one-pass HD initialization before iterative fitting')
+    parser.add_argument('--hd_skip_one_pass_fit', dest='hd_one_pass_fit', action='store_false', help='Disable one-pass HD initialization')
+    parser.set_defaults(hd_one_pass_fit=True)
 
     args = parser.parse_args()
     args.num_classes = 10 if args.dataset == 'CIFAR10' else 100

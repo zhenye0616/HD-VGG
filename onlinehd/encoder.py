@@ -52,15 +52,17 @@ class Encoder(object):
         '''
 
         n = x.size(0)
-        bsize = math.ceil(0.01*n)
+        bsize = max(1, math.ceil(0.01*n))
         h = torch.empty(n, self.dim, device=x.device, dtype=x.dtype)
-        temp = torch.empty(bsize, self.dim, device=x.device, dtype=x.dtype)
 
         # we need batches to remove memory usage
-        for i in range(0, n, bsize):
-            torch.matmul(x[i:i+bsize], self.basis.T, out=temp)
-            torch.add(temp, self.base, out=h[i:i+bsize])
-            h[i:i+bsize].cos_().mul_(temp.sin_())
+        for start in range(0, n, bsize):
+            end = min(start + bsize, n)
+            chunk = x[start:end]
+            projections = torch.matmul(chunk, self.basis.T)
+            phases = projections + self.base
+            chunk_out = torch.cos(phases).mul_(torch.sin(projections))
+            h[start:end] = chunk_out
         return h
 
     def to(self, *args):
