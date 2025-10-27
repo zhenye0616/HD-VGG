@@ -38,3 +38,13 @@ class QuantizedWrapper(torch.nn.Module):
         # Optionally quantize output as well
         out = fake_quantize_tensor(out, self.num_bits)
         return out
+
+    def __getattr__(self, name):
+        """
+        Delegate missing attributes (e.g., hd_head, features) to the wrapped model so
+        downstream code can interact with it transparently.
+        """
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.model, name)

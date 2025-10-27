@@ -54,6 +54,8 @@ def main(args):
         hd_normalize=not args.hd_disable_normalize,
     ).to(device)
     if args.use_hd_classifier:
+        model.hd_head.to(device)
+    if args.use_hd_classifier:
         print(f"Using HD classifier head (dim={args.hd_dim}, normalize={not args.hd_disable_normalize})")
     train_loader, test_loader = load_dataset(args.batch_size, args.dataset)
 
@@ -161,31 +163,32 @@ def main(args):
         print("Re-running test with fake quantized activations...")
         test(model, test_loader, device, epoch='Quantized-Data')
 
-    print("Testing robustness under increasing weight noise...")
     noise_levels = torch.arange(0.0, 0.51, 0.01).tolist()
     original_state = model.state_dict()
     original_hd_model = None
     if args.use_hd_classifier:
         original_hd_model = model.hd_head.model.detach().clone()
 
-    for sigma in noise_levels:
-        print(f"\n[Noise std: {sigma}] injecting into model weights...")
-        if args.use_hd_classifier and original_hd_model is not None:
-            noise = torch.randn_like(original_hd_model) * sigma
-            model.hd_head.model.copy_(original_hd_model + noise)
-            diff_norm = (model.hd_head.model - original_hd_model).norm().item()
-            print(f"HD noise L2 delta: {diff_norm:.3f}")
-        else:
-            noisy_state = {}
-            for name, param in original_state.items():
-                if 'weight' in name and param.dtype == torch.float32:
-                    noise = torch.randn_like(param) * sigma
-                    noisy_state[name] = param + noise
-                else:
-                    noisy_state[name] = param.clone()
-            model.load_state_dict(noisy_state)
-        acc = test(model, test_loader, device, epoch=f'Noise-{sigma:.3f}')
-        print(f"Accuracy with noise std={sigma:.3f}: {acc:.2f}%")
+    if args.noise_injection:
+        print("Testing robustness under increasing weight noise...")
+        for sigma in noise_levels:
+            print(f"\n[Noise std: {sigma}] injecting into model weights...")
+            if args.use_hd_classifier and original_hd_model is not None:
+                noise = torch.randn_like(original_hd_model) * sigma
+                model.hd_head.model.copy_(original_hd_model + noise)
+                diff_norm = (model.hd_head.model - original_hd_model).norm().item()
+                print(f"HD noise L2 delta: {diff_norm:.3f}")
+            else:
+                noisy_state = {}
+                for name, param in original_state.items():
+                    if 'weight' in name and param.dtype == torch.float32:
+                        noise = torch.randn_like(param) * sigma
+                        noisy_state[name] = param + noise
+                    else:
+                        noisy_state[name] = param.clone()
+                model.load_state_dict(noisy_state)
+            acc = test(model, test_loader, device, epoch=f'Noise-{sigma:.3f}')
+            print(f"Accuracy with noise std={sigma:.3f}: {acc:.2f}%")
     if args.use_hd_classifier and original_hd_model is not None:
         model.hd_head.model.copy_(original_hd_model)
     else:
@@ -204,6 +207,7 @@ if __name__ == '__main__':
     parser.add_argument('--step_size', default=20, type=int, help='Step size for LR scheduler')
     parser.add_argument('--gamma', default=0.1, type=float, help='Gamma for LR scheduler')
     parser.add_argument('--epochs', default=50, type=int, help='Number of training epochs')
+    parser.add_argument('--noise_injection', action='store_true', help='test model robustbess with diff noise level')
 
     # Quantization knobs ----------------------------------------------------
     parser.add_argument('--network_quantization', action='store_true', help='Enable network weight quantization to 4 bits')
