@@ -1,1 +1,2 @@
 2025-10-25T13:58:28-07:00 plain_vgg | w_bits=4 | act_bits=5 | 88.08%
+2025-10-29T23:53:01-07:00 plain_vgg | w_bits=4 | act_bits=5 | 87.79%

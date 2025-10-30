@@ -52,6 +52,11 @@ def main(args):
         use_hd_classifier=args.use_hd_classifier,
         hd_dim=args.hd_dim,
         hd_normalize=not args.hd_disable_normalize,
+        activation_noise=args.activation_noise,
+        activation_noise_bits=args.activation_noise_bits,
+        activation_noise_sigma=args.activation_noise_sigma,
+        activation_noise_eval=args.activation_noise_eval,
+        activation_noise_clamp=args.activation_noise_clamp,
     ).to(device)
     if args.use_hd_classifier:
         model.hd_head.to(device)
@@ -148,6 +153,9 @@ def main(args):
             model.hd_head.encoder.base.copy_(hd_checkpoint["hd_encoder_base"].to(device))
         print("HD checkpoint loaded into model.")
 
+    print("Running baseline evaluation on the test set...")
+    test(model, test_loader, device, epoch='Baseline')
+
     # -----------------------------
     # Fake quantization and testing
     # -----------------------------
@@ -162,37 +170,6 @@ def main(args):
         model = QuantizedWrapper(model, args.data_quantization_bits)
         print("Re-running test with fake quantized activations...")
         test(model, test_loader, device, epoch='Quantized-Data')
-
-    noise_levels = torch.arange(0.0, 0.51, 0.01).tolist()
-    original_state = model.state_dict()
-    original_hd_model = None
-    if args.use_hd_classifier:
-        original_hd_model = model.hd_head.model.detach().clone()
-
-    if args.noise_injection:
-        print("Testing robustness under increasing weight noise...")
-        for sigma in noise_levels:
-            print(f"\n[Noise std: {sigma}] injecting into model weights...")
-            if args.use_hd_classifier and original_hd_model is not None:
-                noise = torch.randn_like(original_hd_model) * sigma
-                model.hd_head.model.copy_(original_hd_model + noise)
-                diff_norm = (model.hd_head.model - original_hd_model).norm().item()
-                print(f"HD noise L2 delta: {diff_norm:.3f}")
-            else:
-                noisy_state = {}
-                for name, param in original_state.items():
-                    if 'weight' in name and param.dtype == torch.float32:
-                        noise = torch.randn_like(param) * sigma
-                        noisy_state[name] = param + noise
-                    else:
-                        noisy_state[name] = param.clone()
-                model.load_state_dict(noisy_state)
-            acc = test(model, test_loader, device, epoch=f'Noise-{sigma:.3f}')
-            print(f"Accuracy with noise std={sigma:.3f}: {acc:.2f}%")
-    if args.use_hd_classifier and original_hd_model is not None:
-        model.hd_head.model.copy_(original_hd_model)
-    else:
-        model.load_state_dict(original_state)
     
 
 if __name__ == '__main__':
@@ -207,7 +184,6 @@ if __name__ == '__main__':
     parser.add_argument('--step_size', default=20, type=int, help='Step size for LR scheduler')
     parser.add_argument('--gamma', default=0.1, type=float, help='Gamma for LR scheduler')
     parser.add_argument('--epochs', default=50, type=int, help='Number of training epochs')
-    parser.add_argument('--noise_injection', action='store_true', help='test model robustbess with diff noise level')
 
     # Quantization knobs ----------------------------------------------------
     parser.add_argument('--network_quantization', action='store_true', help='Enable network weight quantization to 4 bits')
@@ -215,9 +191,16 @@ if __name__ == '__main__':
     parser.add_argument('--data_quantization', action='store_true', help='Enable data activation quantization to 5 bits')
     parser.add_argument('--data_quantization_bits', default=5, type=int, help='Number of bits for data activation quantization')
 
+    # Activation noise ------------------------------------------------------
+    parser.add_argument('--activation_noise', action='store_true', help='Enable Gaussian activation noise tied to the quantization step')
+    parser.add_argument('--activation_noise_bits', default=5, type=int, help='Bits used to derive the quantization step for noise scaling')
+    parser.add_argument('--activation_noise_sigma', default=1.0, type=float, help='Gaussian noise std multiplier relative to the quantization step')
+    parser.add_argument('--activation_noise_eval', action='store_true', help='Keep activation noise active during eval/inference mode')
+    parser.add_argument('--activation_noise_clamp', action='store_true', help='Clamp noisy activations back to the quantized dynamic range')
+
     # HD classifier options -------------------------------------------------
     parser.add_argument('--use_hd_classifier', action='store_true', help='Replace final linear layer with HD classifier head')
-    parser.add_argument('--hd_dim', default=10000, type=int, help='Dimensionality of the HD classifier head')
+    parser.add_argument('--hd_dim', default=64, type=int, help='Dimensionality of the HD classifier head')
     parser.add_argument('--hd_disable_normalize', action='store_true', help='Disable L2-normalization inside the HD classifier head')
     parser.add_argument('--hd_bootstrap', default=0.01, type=float, help='Bootstrap fraction (0,1] used to seed HD hypervectors')
     parser.add_argument('--hd_one_pass_fit', dest='hd_one_pass_fit', action='store_true', help='Enable one-pass HD initialization before iterative fitting')
