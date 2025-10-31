@@ -66,25 +66,33 @@ What happens:
 
 ## Quantization Experiments
 
-Two optional flags simulate low-bit quantization:
+Two command-line toggles let you mimic lower-precision hardware:
 
 - `--network_quantization --network_quantization_bits 4`  
-  Applies fake quantization to all trainable weights before re-running evaluation.
+  Permanently fake-quantizes every parameter tensor (values land on the 4-bit grid) before evaluation. Saving the model after this step gives you a weight-compressed checkpoint.
 
 - `--data_quantization --data_quantization_bits 5`  
-  Wraps the model to fake-quantize inputs and outputs during the forward pass.
+  Wraps the model so that activations are fake-quantized to the requested bit width. Every ReLU output inside the network (not just the model I/O) is rounded to that grid, matching our 5-bit activation constraint.
 
-Both operate after loading the requested checkpoints (backbone or HD).
+Combine the two flags to replicate the current hardware plan (4-bit weights, 5-bit activations).
 
-## Noise Robustness Sweep
+## Noise Robustness Sweeps
 
-`main.py` automatically evaluates robustness by injecting zero-mean Gaussian noise into model weights:
+Noise experiments now live in `scripts/`:
 
-- For backbone-only runs: perturb every float32 weight tensor inside VGG.
-- For HD runs: keep the backbone untouched and add noise directly to the OnlineHD class hypervectors.
-- Noise standard deviations span `0.00 … 0.50` in `0.02` increments.
-- For each sigma the script prints the accuracy and, in HD mode, the L2 norm of the injected perturbation (`HD noise L2 delta`).
-- The original weights/hypervectors are restored at the end; checkpoints on disk remain unchanged.
+- `scripts/sweep_vgg_noise.sh` runs the backbone with optional 4-bit weight + 5-bit activation quantization and sweeps Gaussian activation-noise sigmas. Pass `--output logs/foo.csv` to archive results.
+- `scripts/sweep_vgg_hd64_noise.sh` mirrors the workflow for HD checkpoints (default `hd_dim=64`).
+
+Example (hardware-mimicking sweep):
+
+```bash
+conda run -n vgg_hd bash scripts/sweep_vgg_noise.sh \
+  --sigma-start 0.0 --sigma-stop 0.5 --sigma-step 0.01 \
+  --weight-bits 4 --bits 5 \
+  --output logs/vgg11_noise_quant.csv
+```
+
+The CSV logs contain `sigma,accuracy` pairs you can plot or compare against previous runs.
 
 ## Checkpoint Summary
 
