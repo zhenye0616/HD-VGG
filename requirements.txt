@@ -1,0 +1,9 @@
+numpy==2.2.6
+torch==2.8.0
+torchvision==0.23.0
+tqdm==4.67.1
+onnx==1.19.1
+onnxruntime-gpu==1.23.2
+onnx-simplifier==0.4.36
+tensorrt-cu12==10.13.3.9
+cuda-python==13.0.3

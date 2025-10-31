@@ -18,17 +18,16 @@
 
 ## Requirements
 - Python ≥ 3.8
-- PyTorch ≥ 1.12 and torchvision
-- tqdm (optional, for progress bars)
+- CUDA-compatible PyTorch build (see `requirements.txt`)
 - A C++14 toolchain (e.g., GCC or Clang) for compiling `onlinehd/fasthd` via `torch.utils.cpp_extension`
 
-Example setup:
+Example setup (using Conda and the provided requirements file):
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+conda create -n vgg_hd python=3.10
+conda activate vgg_hd
 pip install --upgrade pip
-pip install torch torchvision tqdm
+pip install -r requirements.txt
 ```
 
 The first import of `onlinehd` will trigger a JIT build of the C++ extension; ensure the toolchain is available on your system.
